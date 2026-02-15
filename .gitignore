@@ -1,0 +1,12 @@
+# Python virtual environment
+venv/
+.venv/
+env/
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.env
+infra/logs/
+*.log
