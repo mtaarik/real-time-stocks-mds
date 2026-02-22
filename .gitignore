@@ -10,3 +10,33 @@ __pycache__/
 .env
 infra/logs/
 *.log
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets & Config
+.env
+profiles.yml
+*.pem
+
+# Docker & Databases
+postgres_data/
+zookeeper_data/
+kafka_data/
+minio_data/
+*.db
+
+# Airflow
+logs/
+plugins/
+airflow-webserver.pid
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
