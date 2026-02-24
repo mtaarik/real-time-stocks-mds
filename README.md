@@ -138,4 +138,3 @@ real-time-stocks-pipeline/
 
 **Author**: *Mohamed Amine Tarik* 
 
-**LinkedIn**: [username](www.linkedin.com/in/mohamed-amine-tarik) 
