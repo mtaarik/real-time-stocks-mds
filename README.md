@@ -48,11 +48,13 @@ real-time-stocks-pipeline/
 │       ├── gold_candlestick.sql
 │       ├── gold_kpi.sql
 │       └── gold_treechart.sql
-├── dag/
-│   └── minio_to_snowflake.py
-├── docker-compose.yml            # Kafka, Zookeeper, MinIO, Airflow, Postgres
+├── infra/
+│   ├── dag/
+│   │   └── minio_to_snowflake.py
+│   └── docker-compose.yml        # Kafka, Zookeeper, MinIO, Airflow, Postgres
 ├── requirements.txt
-└── README.md                     # Documentation
+└── README.md
+                  # Documentation
 ```
 ---
 
