@@ -1,24 +1,28 @@
 import os
+import shutil
 import boto3
 import snowflake.connector
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from datetime import datetime, timedelta
 
-MINIO_ENDPOINT = "http://minio:9000"
-MINIO_ACCESS_KEY = "admin"
-MINIO_SECRET_KEY = "password123"
+# Development defaults for the local docker-compose stack; override them with environment variables
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "admin")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "password123")
 BUCKET = "bronze-transactions"
 LOCAL_DIR = "/tmp/minio_downloads"  # use absolute path for Airflow
 
-SNOWFLAKE_USER = "<<YOUR_USERNAME>>"
-SNOWFLAKE_PASSWORD = "<<YOUR_PASSWORD>>"
-SNOWFLAKE_ACCOUNT = "<<YOUR_ACCOUNT>>"
+SNOWFLAKE_USER = os.getenv("SNOWFLAKE_USER")
+SNOWFLAKE_PASSWORD = os.getenv("SNOWFLAKE_PASSWORD")
+SNOWFLAKE_ACCOUNT = os.getenv("SNOWFLAKE_ACCOUNT")
 SNOWFLAKE_WAREHOUSE = "COMPUTE_WH"
 SNOWFLAKE_DB = "STOCKS_MDS"
 SNOWFLAKE_SCHEMA = "COMMON"
 
 def download_from_minio():
+    # Start from an empty folder so files from a previous run are never loaded twice
+    shutil.rmtree(LOCAL_DIR, ignore_errors=True)
     os.makedirs(LOCAL_DIR, exist_ok=True)
     s3 = boto3.client(
         "s3",
@@ -26,14 +30,20 @@ def download_from_minio():
         aws_access_key_id=MINIO_ACCESS_KEY,
         aws_secret_access_key=MINIO_SECRET_KEY
     )
-    objects = s3.list_objects_v2(Bucket=BUCKET).get("Contents", [])
+
+    # list_objects_v2 returns at most 1,000 objects per call: the paginator walks every page,
+    # otherwise new files are silently skipped once the bucket holds more than 1,000 objects
+    paginator = s3.get_paginator("list_objects_v2")
     local_files = []
-    for obj in objects:
-        key = obj["Key"]
-        local_file = os.path.join(LOCAL_DIR, os.path.basename(key))
-        s3.download_file(BUCKET, key, local_file)
-        print(f"Downloaded {key} -> {local_file}")
-        local_files.append(local_file)
+    for page in paginator.paginate(Bucket=BUCKET):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            # Keep the symbol in the file name: AAPL/1700000000.json and TSLA/1700000000.json
+            # would otherwise both become 1700000000.json and overwrite each other
+            local_file = os.path.join(LOCAL_DIR, key.replace("/", "_"))
+            s3.download_file(BUCKET, key, local_file)
+            print(f"Downloaded {key} -> {local_file}")
+            local_files.append(local_file)
     return local_files
 
 def load_to_snowflake(**kwargs):

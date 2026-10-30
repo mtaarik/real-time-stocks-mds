@@ -1,0 +1,8 @@
+.env
+infra/.env
+infra/logs/
+infra/plugins/
+__pycache__/
+*.pyc
+dbt_stocks/**/target/
+dbt_stocks/**/logs/
