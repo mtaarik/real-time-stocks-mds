@@ -1,142 +1,108 @@
-# Real-Time Stocks Market Data Pipeline
+# Real-Time Stock Market Data Pipeline
 
----
+End-to-end ELT pipeline on **live market data** (not simulated): stock quotes are fetched from the
+Finnhub API, streamed through **Kafka**, landed in a **MinIO** data lake, loaded into **Snowflake**
+every minute by **Airflow**, modeled with **dbt** in Bronze / Silver / Gold layers and visualized in
+**Power BI** (DirectQuery).
 
-## 📌 Project Overview
-This project demonstrates an **end-to-end real-time data pipeline** using the **Modern Data Stack**.  
-We capture **live stock market data** from an external API, stream it in real time, orchestrate transformations, and deliver analytics-ready insights — all in one unified project.
+![Architecture](images/image.png)
 
-![Texte alternatif](images/image.png)
----
+## Pipeline
 
-## ⚡ Tech Stack
-- **Snowflake** → Cloud Data Warehouse  
-- **DBT** → SQL-based Transformations  
-- **Apache Airflow** → Workflow Orchestration  
-- **Apache Kafka** → Real-time Streaming  
-- **Python** → Data Fetching & API Integration  
-- **Docker** → Containerization  
-- **Power BI** → Data Visualization  
+```mermaid
+flowchart LR
+    API[Finnhub API<br/>/quote] -->|Python producer<br/>5 tickers, polling| K[[Kafka<br/>topic stock-quotes]]
+    K -->|Python consumer<br/>group bronze-consumer1| M[(MinIO<br/>bronze-transactions)]
+    M -->|Airflow DAG every minute<br/>PUT + COPY INTO| S[(Snowflake<br/>bronze_stock_quotes_raw)]
+    S -->|dbt| B[Bronze<br/>staging]
+    B --> SI[Silver<br/>cleaned]
+    SI --> G[Gold<br/>KPIs, candlesticks,<br/>volatility]
+    G -->|DirectQuery| P[Power BI]
+```
 
----
+| Step | Component | What it does |
+|---|---|---|
+| Extract | `producer/producer.py` | Polls the Finnhub `/quote` endpoint for AAPL, MSFT, TSLA, GOOGL and AMZN, adds `symbol` and `fetched_at`, publishes JSON to the `stock-quotes` topic (5 retries, 1 s backoff, API key read from `.env`). |
+| Stream | Kafka + Zookeeper, Kafdrop | Decouples the API rate from storage and allows replay through consumer offsets. |
+| Land | `consumer/consumer.py` | Consumes the topic and writes each quote to MinIO as `{symbol}/{timestamp}.json` (bucket created if missing). |
+| Load | `infra/dags/minio_to_snowflake.py` | Airflow DAG, every minute: downloads the new files from MinIO, then bulk-loads them into Snowflake with an internal stage (`PUT` + `COPY INTO`). |
+| Transform | `dbt_stocks/` | 5 dbt models: JSON parsing and typing (Bronze), cleaning and rounding (Silver), 3 analytical models (Gold). |
+| Visualize | Power BI | Candlestick chart, volatility treemap and a sortable real-time KPI table on the Gold layer. |
 
-## ✅ Key Features
-- Fetching **live stock market data** (not simulated) from an API  
-- Real-time streaming pipeline with **Kafka**  
-- Orchestrated ETL workflow using **Airflow**  
-- Transformations using **DBT** inside Snowflake  
-- Scalable cloud warehouse powered by **Snowflake**  
-- Analytics-ready **Power BI dashboards**  
+## dbt models
 
----
+| Layer | Model | Content |
+|---|---|---|
+| Bronze | `bronze_stg_stock_quotes` | Extracts and types the fields of the raw JSON (`VARIANT`) |
+| Silver | `silver_clean_stock_quotes` | Rounded prices, rows without a price removed |
+| Gold | `gold_kpi` | Latest quote per symbol (`ROW_NUMBER`): price, change, change % |
+| Gold | `gold_candlestick` | Daily OHLC candles and a trend line per symbol (window functions) |
+| Gold | `gold_treechart` | Average price, volatility (`STDDEV_POP`) and relative volatility (coefficient of variation) |
 
-## 📂 Repository Structure
+## Engineering fixes
+
+Two silent bugs found while running the pipeline:
+
+1. **Silent data loss after 1,000 files.** `list_objects_v2` returns at most 1,000 objects per call.
+   Once the bucket grew past that size, new quotes stayed in MinIO but never reached Snowflake.
+   The DAG now walks every page with a boto3 **paginator**.
+2. **File name collisions.** Downloading `AAPL/1700000000.json` and `TSLA/1700000000.json` with
+   `os.path.basename` produced the same local file name, so one quote overwrote the other. Local
+   names now keep the symbol (`AAPL_1700000000.json`), and the temporary folder is emptied at the
+   start of each run so a run never reloads the files of the previous one.
+
+## Run it
+
+Requirements: Docker, Python 3.10+, a Finnhub API key and a Snowflake account.
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env            # FINNHUB_API_KEY for the producer
+cp .env.example infra/.env      # SNOWFLAKE_* for the Airflow DAG
+
+cd infra
+docker compose up -d            # Zookeeper, Kafka, Kafdrop, MinIO, Airflow, Postgres
+
+# First start only: initialize the Airflow metadata database and create an admin user
+docker compose run --rm airflow-webserver airflow db migrate
+docker compose exec airflow-webserver airflow users create --role Admin \
+  --username admin --firstname <first> --lastname <last> --email <email> --password <password>
+cd ..
+
+python producer/producer.py     # terminal 1
+python consumer/consumer.py     # terminal 2
+```
+
+Then enable the `minio_to_snowflake` DAG in Airflow (http://localhost:8080) and run the dbt models
+against Snowflake (`dbt run`).
+
+| Interface | URL |
+|---|---|
+| Airflow | http://localhost:8080 |
+| Kafdrop (Kafka UI) | http://localhost:9000 |
+| MinIO console | http://localhost:9001 |
+
+## Limitations and next steps
+
+- dbt runs separately from the DAG: the next step is a `dbt run` + `dbt test` task after `load_snowflake`.
+- One JSON file per message creates many small files: batching in the consumer, or Snowpipe /
+  the Snowflake Kafka connector, would scale better.
+- The DAG lists the whole bucket on each run; date prefixes or a `processed/` folder would avoid it.
+- Outside market hours the API returns the last quote again: deduplicating on
+  `(symbol, market_timestamp)` would remove these repeats.
+- Development setup: single Kafka broker, replication factor 1, local credentials.
+
+## Repository structure
 
 ```text
-real-time-stocks-pipeline/
-├── producer/                     # Kafka producer (Finnhub API)
-│   └── producer.py
-├── consumer/                     # Kafka consumer (MinIO sink)
-│   └── consumer.py
-├── dbt_stocks/models/
-│   ├── bronze
-│   │   ├── bronze_stg_stock_quotes.sql
-│   │   └── sources.yml
-│   ├── silver
-│   │   └── silver_clean_stock_quotes.sql
-│   └── gold
-│       ├── gold_candlestick.sql
-│       ├── gold_kpi.sql
-│       └── gold_treechart.sql
-├── infra/
-│   ├── dag/
-│   │   └── minio_to_snowflake.py
-│   └── docker-compose.yml        # Kafka, Zookeeper, MinIO, Airflow, Postgres
-├── requirements.txt
-└── README.md
-                  # Documentation
+producer/                Kafka producer (Finnhub API)
+consumer/                Kafka consumer (MinIO sink)
+infra/
+  docker-compose.yml     Zookeeper, Kafka, Kafdrop, MinIO, Airflow, Postgres
+  dags/                  Airflow DAG: MinIO -> Snowflake
+dbt_stocks/dbt_stocks/models/
+  bronze/                staging model and source declaration
+  silver/                cleaned quotes
+  gold/                  KPIs, candlesticks, volatility
+images/                  architecture diagram
 ```
----
-
-## 🚀 Getting Started
-1. Clone this repo and set up environment  
-2. Start Kafka + Airflow services via Docker  
-3. Run the Python producer to fetch live stock data  
-4. Data flows into Snowflake → DBT applies transformations  
-5. Orchestrate everything with Airflow  
-6. Connect Power BI for visualization  
-
----
-
-## ⚙️ Step-by-Step Implementation
-
-### **1. Kafka Setup**
-- Configured **Apache Kafka** locally using Docker.
-- Created a **stocks-topic** to handle live stock market events.
-- Defined producers (API fetch) and consumers (pipeline ingestion).
-
----
-
-### **2. Live Market Data Producer**
-- Developed **Python producer script** `stock_producer.py` to fetch **real-time stock prices** from the **Finnhub API** using an API key.
-- Streams stock data into Kafka in JSON format.
-- **(producer/producer.py)**
-
----
-
-### **3. Kafka Consumer → MinIO**
-- Built **Python consumer script** `stock_consumer.py` to consume streaming data from Kafka.
-- Stored consumed data into **MinIO buckets** (S3-compatible storage).
-- Organized storage into folders for **raw/bronze layer ingestion**.
-- **(consumer/consumer.py)**
-
----
-
-### **4. Airflow Orchestration**
-- Initialized **Apache Airflow** in Docker.
-- Created DAG (`stock_pipeline_dag.py`) to:
-  - Load data from MinIO into **Snowflake staging tables** (Bronze).
-  - Schedule automated runs every **1 minute**.
-- **(dag/minio_to_snowflake.py)**
-
----
-
-### **5. Snowflake Warehouse Setup**
-- Created **Snowflake database, schema, and warehouse**.
-- Defined staging tables for **Bronze → Silver → Gold** layers.
-- SQL scripts available at:
-  - **(snowflake/sql_init.sql)**
-
----
-
-### **6. DBT Transformations**
-- Configured **DBT project** with Snowflake connection.
-- Models include:
-  - **(dbt_stocks/models/bronze/bronze_stg_stock_quotes.sql)** → raw structured data  
-  - **(dbt_stocks/models/silver/silver_clean_stock_quotes.sql)** → cleaned, validated data  
-  - **(dbt_stocks/models/gold)** → analytical views (Candlestick, KPI, Tree Map)
-      
-
----
-
-### **7. Power BI Dashboard**
-- Connected **Power BI** to Snowflake (Gold layer) using **Direct Query**.
-- Built:
-  - **Candlestick chart** → stock market patterns  
-  - **Tree chart** → stock price trends  
-  - **gauge charts** → stock volume & total sales breakdown  
-  - **KPI's** → real-time sortable view  
-
----
-
-## 📊 Final Deliverables
-- **Automated real-time data pipeline**  
-- **Snowflake tables (Bronze → Silver → Gold)**  
-- **Transformed analytics models with DBT**  
-- **Orchestrated DAGs in Airflow**  
-- **Power BI dashboard with live insights**  
-
----
-
-**Author**: *Mohamed Amine Tarik* 
-
